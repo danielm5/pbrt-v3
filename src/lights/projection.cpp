@@ -38,6 +38,7 @@
 #include "imageio.h"
 #include "reflection.h"
 #include "stats.h"
+#include "rng.h"
 
 namespace pbrt {
 
@@ -45,7 +46,8 @@ namespace pbrt {
 ProjectionLight::ProjectionLight(const Transform &LightToWorld,
                                  const MediumInterface &mediumInterface,
                                  const Spectrum &I, const std::string &texname,
-                                 Float fov)
+                                 Float fov,
+                                 Float focalDistance, Float lensRadius)
     : Light((int)LightFlags::DeltaPosition, LightToWorld, mediumInterface),
       pLight(LightToWorld(Point3f(0, 0, 0))),
       I(I) {
@@ -66,6 +68,8 @@ ProjectionLight::ProjectionLight(const Transform &LightToWorld,
     hither = 1e-3f;
     yon = 1e30f;
     lightProjection = Perspective(fov, hither, yon);
+    focald = focalDistance;
+    lensr = lensRadius;
 
     Transform screenToLight = Inverse(lightProjection);
     Point3f pCorner(screenBounds.pMax.x, screenBounds.pMax.y, 0);
@@ -77,7 +81,8 @@ Spectrum ProjectionLight::Sample_Li(const Interaction &ref, const Point2f &u,
                                     Vector3f *wi, Float *pdf,
                                     VisibilityTester *vis) const {
     ProfilePhase _(Prof::LightSample);
-    *wi = Normalize(pLight - ref.p);
+    //*wi = Normalize(pLight - ref.p);
+    *wi = pLight - ref.p;
     *pdf = 1;
     *vis =
         VisibilityTester(ref, Interaction(pLight, ref.time, mediumInterface));
@@ -86,6 +91,37 @@ Spectrum ProjectionLight::Sample_Li(const Interaction &ref, const Point2f &u,
 
 Spectrum ProjectionLight::Projection(const Vector3f &w) const {
     Vector3f wl = WorldToLight(w);
+
+    static RNG rng;
+
+    if (lensr > 0.0) {
+
+      //compute new focal image plane distance of the point to be projected;
+      //we are assuming that the focal image initial distance is 1.
+      Float focald_d = focald;
+      //double fI = 1/((1+focald_d)/focald_d - 1/wl.z);
+      Float fI = (focald_d*wl.z) / (wl.z*(1.0 + focald_d) - focald_d);
+      Vector3f wlp = Vector3f(-fI*wl.x / wl.z, -fI*wl.y / wl.z, -fI);
+
+      //sample point on lens
+      Point2f sample = ConcentricSampleDisk(
+        Point2f(rng.UniformFloat(), rng.UniformFloat()));
+      sample *= lensr;
+      Vector3f Puv = Vector3f(sample.x, sample.y, 0);
+      Vector3f D = ((fI - 1.0) / fI)*Puv + (1.0 / fI)*wlp;
+      Vector3f error = D + wl / wl.z;
+      //if(error.Length()>0.000001)
+      // printf("erro\n");
+
+      //if(fabs(fI - 1)<0.01){
+      //  printf("%f %f %f %f\n", wl.x/wl.z, wl.y/wl.z, D.x,  D.y);
+      //printf("%f \n", D.z);
+      //}
+      wl = -D;
+    }
+
+    Normalize(wl);
+
     // Discard directions behind projection light
     if (wl.z < hither) return 0;
 
@@ -136,9 +172,14 @@ std::shared_ptr<ProjectionLight> CreateProjectionLight(
     Spectrum I = paramSet.FindOneSpectrum("I", Spectrum(1.0));
     Spectrum sc = paramSet.FindOneSpectrum("scale", Spectrum(1.0));
     Float fov = paramSet.FindOneFloat("fov", 45.);
+    Float focalDistance = paramSet.FindOneFloat("focaldistance", 1e30f);
+    printf("[DEBUG] focalDistance = %lf\n", static_cast<double>(focalDistance));
+    Float lensRadius = paramSet.FindOneFloat("lensradius", 0.f);
+    printf("[DEBUG] lensRadius = %lf\n", static_cast<double>(lensRadius));
     std::string texname = paramSet.FindOneFilename("mapname", "");
     return std::make_shared<ProjectionLight>(light2world, medium, I * sc,
-                                             texname, fov);
+                                             texname, fov,
+                                             focalDistance, lensRadius);
 }
 
 }  // namespace pbrt
